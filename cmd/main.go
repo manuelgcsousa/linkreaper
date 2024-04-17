@@ -16,11 +16,12 @@ import (
 
 var (
     // URL regex
-    UrlRegexStr string = `\bhttps?://\S+`
-    UrlRegex *regexp.Regexp = regexp.MustCompile(UrlRegexStr)
+    urlRegexStr string = `\bhttps?://\S+`
+    urlRegex *regexp.Regexp = regexp.MustCompile(urlRegexStr)
 
     // HTTP Client with timeout
-    HttpClient *http.Client = &http.Client{
+    httpClient *http.Client = &http.Client{
+        Transport: &http.Transport{DisableKeepAlives: true},  // do lot leave connections open
         Timeout: 10 * time.Second,
     }
 )
@@ -30,14 +31,14 @@ func main() {
     flag.Parse()
 
     if *filename == "" {
-        fmt.Println("No file provided")
+        fmt.Println("no file provided")
         return
     }
 
     // Open file passed as argument
     file, err := os.Open(*filename)
     if err != nil {
-        fmt.Println("Error while reading file")
+        fmt.Println("error while reading file")
         return
     }
     defer file.Close()
@@ -81,7 +82,7 @@ func main() {
 // Get all regex matches.
 // If there are no matches found, return an error.
 func getUrlMatches(line string) ([]string, error) {
-    matches := UrlRegex.FindAllString(line, -1)
+    matches := urlRegex.FindAllString(line, -1)
     if len(matches) == 0 {
         return nil, errors.New("no matches")
     }
@@ -106,7 +107,10 @@ func isUrlAlive(url string) bool {
         return false
     }
 
-    res, err := HttpClient.Do(req)
+    res, err := httpClient.Do(req)
+    if res != nil {
+        defer res.Body.Close()
+    }
     if err != nil {
         return false
     }
