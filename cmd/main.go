@@ -14,6 +14,25 @@ import (
 	"github.com/fatih/color"
 )
 
+type Result struct {
+	mut         sync.Mutex
+	lineMatches [][]string
+}
+
+func (res *Result) AddMatch(lineNum int, match string) {
+	res.mut.Lock()
+	defer res.mut.Unlock()
+
+	res.lineMatches[lineNum] = append(res.lineMatches[lineNum], match)
+}
+
+func (res *Result) GetMatches(lineNum int) []string {
+	res.mut.Lock()
+	defer res.mut.Unlock()
+
+	return res.lineMatches[lineNum]
+}
+
 var (
 	// URL regex
 	urlRegexStr string         = `\bhttps?://\S+`
@@ -21,7 +40,7 @@ var (
 
 	// HTTP Client with timeout
 	httpClient *http.Client = &http.Client{
-		Transport: &http.Transport{DisableKeepAlives: true}, // do lot leave connections open
+		Transport: &http.Transport{DisableKeepAlives: true}, // do not leave connections open
 		Timeout:   10 * time.Second,
 	}
 )
@@ -47,34 +66,45 @@ func main() {
 	scanner := bufio.NewScanner(file)
 	scanner.Split(bufio.ScanLines)
 
-	var lines []string
-	for scanner.Scan() {
-		matches, err := getUrlMatches(scanner.Text())
-		if err != nil {
-			continue
-		}
-
-		lines = append(lines, matches...)
-	}
-
 	var (
-		results []string
-		wg      sync.WaitGroup
+		lines    []*string
+		numLines int
 	)
 
-	results = make([]string, len(lines))
-	wg.Add(len(lines))
+	for numLines = 0; scanner.Scan(); numLines++ {
+		text := scanner.Text()
+		lines = append(lines, &text)
+	}
 
-	for i, line := range lines {
-		go checkUrlMatch(&wg, line, results, i)
+	var wg sync.WaitGroup
+	result := Result{
+		lineMatches: make([][]string, numLines),
+	}
+
+	for lineNum, line := range lines {
+		wg.Add(1)
+
+		go func(lineNum int, line string) {
+			defer wg.Done()
+
+			matches, err := getUrlMatches(line)
+			if err != nil {
+				return
+			}
+
+			for _, match := range matches {
+				if !isUrlAlive(match) {
+					result.AddMatch(lineNum, match)
+				}
+			}
+		}(lineNum, *line)
 	}
 
 	wg.Wait()
 
-	// Print results with corresponding line
-	for i, result := range results {
-		if result != "" {
-			printColoredUrl(i, result)
+	for line, matches := range result.lineMatches {
+		for _, match := range matches {
+			printColoredUrl(line, match)
 		}
 	}
 }
@@ -84,19 +114,9 @@ func main() {
 func getUrlMatches(line string) ([]string, error) {
 	matches := urlRegex.FindAllString(line, -1)
 	if len(matches) == 0 {
-		return nil, errors.New("no matches")
+		return nil, errors.New("no URL matches")
 	}
 	return matches, nil
-}
-
-// Check if an URL match is alive.
-// If URL is alive, saves entry within the corresponding line index.
-func checkUrlMatch(wg *sync.WaitGroup, match string, results []string, index int) {
-	defer wg.Done()
-
-	if isUrlAlive(match) {
-		results[index] = match
-	}
 }
 
 // Verifies if an URL is working or not.
