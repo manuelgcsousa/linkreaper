@@ -16,7 +16,7 @@ import (
 
 type Result struct {
 	mut         sync.Mutex
-	lineMatches [][]string
+	lineMatches map[int][]string
 }
 
 func (res *Result) AddMatch(lineNum int, match string) {
@@ -33,6 +33,11 @@ func (res *Result) GetMatches(lineNum int) []string {
 	return res.lineMatches[lineNum]
 }
 
+type Line struct {
+	Number int
+	Text   string
+}
+
 var (
 	// URL regex
 	urlRegexStr string         = `\bhttps?://\S+`
@@ -47,10 +52,16 @@ var (
 
 func main() {
 	filename := flag.String("f", "", "file path")
+	workers := flag.Int("w", 10, "number of concurrent workers")
 	flag.Parse()
 
 	if *filename == "" {
 		fmt.Println("no file provided")
+		return
+	}
+
+	if *workers <= 0 {
+		fmt.Println("number of concurrent workers must be greater than 0")
 		return
 	}
 
@@ -62,49 +73,53 @@ func main() {
 	}
 	defer file.Close()
 
-	// Read file content line by line
-	scanner := bufio.NewScanner(file)
-	scanner.Split(bufio.ScanLines)
-
+	// Init:
+	// wait group \
+	// buffered channel to process lines \
+	// result line matches
 	var (
-		lines    []*string
-		numLines int
+		wg     sync.WaitGroup
+		lines  = make(chan Line, *workers)
+		result = Result{lineMatches: make(map[int][]string)}
 	)
 
-	for numLines = 0; scanner.Scan(); numLines++ {
-		text := scanner.Text()
-		lines = append(lines, &text)
-	}
-
-	var wg sync.WaitGroup
-	result := Result{
-		lineMatches: make([][]string, numLines),
-	}
-
-	for lineNum, line := range lines {
+	// Give work to the workers
+	for i := 0; i < *workers; i++ {
 		wg.Add(1)
-
-		go func(lineNum int, line string) {
-			defer wg.Done()
-
-			matches, err := getUrlMatches(line)
-			if err != nil {
-				return
-			}
-
-			for _, match := range matches {
-				if !isUrlAlive(match) {
-					result.AddMatch(lineNum, match)
-				}
-			}
-		}(lineNum, *line)
+		go processLines(lines, &result, &wg)
 	}
+
+	// Scan file and start sending lines to buffered channel
+	scanner := bufio.NewScanner(file)
+	for i := 0; scanner.Scan(); i++ {
+		lines <- Line{Number: i, Text: scanner.Text()}
+	}
+	close(lines)
 
 	wg.Wait()
 
 	for line, matches := range result.lineMatches {
 		for _, match := range matches {
 			printColoredUrl(line, match)
+		}
+	}
+}
+
+func processLines(lines <-chan Line, result *Result, wg *sync.WaitGroup) {
+	defer wg.Done()
+
+	for line := range lines {
+		matches, err := getUrlMatches(line.Text)
+		if err != nil {
+			continue
+		}
+
+		for _, match := range matches {
+			if !isUrlAlive(match) {
+				if err == nil {
+					result.AddMatch(line.Number, match)
+				}
+			}
 		}
 	}
 }
