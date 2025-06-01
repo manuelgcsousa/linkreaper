@@ -2,7 +2,7 @@
 
 Checks which URLs are alive within a webpage.
 
-- Still a WIP, some feature are still missing.
+- Still a WIP, some features are still missing.
 
 ## Usage
 
