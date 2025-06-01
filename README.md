@@ -1,23 +1,16 @@
 # linkreaper
 
-Checks which URLs within a file are still alive.
+Checks which URLs are alive within a webpage.
 
-- For now, only works with text files.
-- This project was made to experiment with go's concurrency.
-
-## Installation
-
-1. Build the binary:
-   ```bash
-   make build
-   ```
-2. Install it to `/usr/local/bin`:
-   ```bash
-   sudo make install
-   ```
+- Still a WIP, some feature are still missing.
 
 ## Usage
 
-```bash
-linkreaper -f <file> -w <numOfWorkers>
-```
+1. Build:
+   ```bash
+   make build
+   ```
+2. Execute:
+   ```bash
+   ./bin/linkreaper -url "https://example.com"
+   ```

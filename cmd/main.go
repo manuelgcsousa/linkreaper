@@ -1,162 +1,130 @@
 package main
 
 import (
-	"bufio"
-	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"net/http"
+	urlUtils "net/url"
 	"os"
-	"regexp"
+	"strings"
 	"sync"
 	"time"
 
-	"github.com/fatih/color"
+	"golang.org/x/net/html"
+	"golang.org/x/net/html/atom"
 )
 
-type Result struct {
-	mut         sync.Mutex
-	lineMatches map[int][]string
-}
-
-func (res *Result) AddMatch(lineNum int, match string) {
-	res.mut.Lock()
-	defer res.mut.Unlock()
-
-	res.lineMatches[lineNum] = append(res.lineMatches[lineNum], match)
-}
-
-func (res *Result) GetMatches(lineNum int) []string {
-	res.mut.Lock()
-	defer res.mut.Unlock()
-
-	return res.lineMatches[lineNum]
-}
-
-type Line struct {
-	Number int
-	Text   string
-}
-
 var (
-	// URL regex
-	urlRegexStr string         = `\bhttps?://\S+`
-	urlRegex    *regexp.Regexp = regexp.MustCompile(urlRegexStr)
-
-	// HTTP Client with timeout
 	httpClient *http.Client = &http.Client{
-		Transport: &http.Transport{DisableKeepAlives: true}, // do not leave connections open
+		Transport: &http.Transport{DisableKeepAlives: true}, // don't leave connections open
 		Timeout:   10 * time.Second,
 	}
+
+	baseUri string
 )
 
 func main() {
-	filename := flag.String("f", "", "file path")
-	workers := flag.Int("w", 10, "number of concurrent workers")
+	url := flag.String("url", "", "url to fetch")
 	flag.Parse()
 
-	if *filename == "" {
-		fmt.Println("no file provided")
-		return
+	if *url == "" {
+		fmt.Println("No URL provided. Exiting...")
+		os.Exit(1)
 	}
 
-	if *workers <= 0 {
-		fmt.Println("number of concurrent workers must be greater than 0")
-		return
-	}
-
-	// Open file passed as argument
-	file, err := os.Open(*filename)
+	// Parse URL and check if it's valid
+	// If so, build the base URI
+	parseUrl, err := urlUtils.Parse(*url)
 	if err != nil {
-		fmt.Println("error while reading file")
-		return
-	}
-	defer file.Close()
-
-	// Init:
-	// wait group \
-	// buffered channel to process lines \
-	// result line matches
-	var (
-		wg     sync.WaitGroup
-		lines  = make(chan Line, *workers)
-		result = Result{lineMatches: make(map[int][]string)}
-	)
-
-	// Give work to the workers
-	for i := 0; i < *workers; i++ {
-		wg.Add(1)
-		go processLines(lines, &result, &wg)
+		fmt.Printf("Error while extracting base URI from '%s'\n", *url)
+		os.Exit(1)
+	} else {
+		baseUri = fmt.Sprintf("%s://%s", parseUrl.Scheme, parseUrl.Host)
 	}
 
-	// Scan file and start sending lines to buffered channel
-	scanner := bufio.NewScanner(file)
-	for i := 0; scanner.Scan(); i++ {
-		lines <- Line{Number: i, Text: scanner.Text()}
+	// Fetch provided URL
+	res, err := httpClient.Get(*url)
+	if err != nil {
+		fmt.Printf("Error while fetching '%s'\n", *url)
+		os.Exit(1)
 	}
-	close(lines)
 
-	wg.Wait()
-
-	for line, matches := range result.lineMatches {
-		for _, match := range matches {
-			printColoredUrl(line, match)
-		}
+	// Extract data from HTTP response
+	bytes, err := io.ReadAll(res.Body)
+	if err != nil {
+		fmt.Println("Error while reading response body data")
+		os.Exit(1)
 	}
-}
 
-func processLines(lines <-chan Line, result *Result, wg *sync.WaitGroup) {
-	defer wg.Done()
+	// Get the parse tree from the extracted HTML data
+	doc, err := html.Parse(strings.NewReader(string(bytes)))
+	if err != nil {
+		fmt.Println("Error while parsing HTML tree from response body data")
+		os.Exit(1)
+	}
 
-	for line := range lines {
-		matches, err := getUrlMatches(line.Text)
-		if err != nil {
+	// Init wait group
+	var wg sync.WaitGroup
+
+	for node := range doc.Descendants() {
+		if node.Type != html.ElementNode || node.DataAtom != atom.A {
 			continue
 		}
 
-		for _, match := range matches {
-			if !isUrlAlive(match) {
-				if err == nil {
-					result.AddMatch(line.Number, match)
-				}
+		wg.Add(1)
+		go processAnchorNodeAttributes(node.Attr, &wg)
+	}
+
+	wg.Wait()
+}
+
+func processAnchorNodeAttributes(attributes []html.Attribute, wg *sync.WaitGroup) {
+	defer wg.Done()
+
+	for _, val := range attributes {
+		// Skip if no 'href' attribute
+		if val.Key != "href" || val.Val == "" {
+			continue
+		}
+
+		url := val.Val
+
+		// Parse extracted URL
+		//
+		// If there isn't any scheme or host, it's probably a relative link,
+		// so we join with the host URL.
+		parsedUrl, err := urlUtils.Parse(url)
+		if err != nil {
+			continue
+		} else {
+			if parsedUrl.Scheme == "" && parsedUrl.Host == "" {
+				url = fmt.Sprintf("%s%s", baseUri, url)
 			}
+		}
+
+		if status, code := isUrlAlive(url); status {
+			fmt.Printf("['%s' => %d OK]\n", url, code)
+		} else {
+			fmt.Printf("['%s' => %d RIP]\n", url, code)
 		}
 	}
 }
 
-// Get all regex matches.
-// If there are no matches found, return an error.
-func getUrlMatches(line string) ([]string, error) {
-	matches := urlRegex.FindAllString(line, -1)
-	if len(matches) == 0 {
-		return nil, errors.New("no URL matches")
-	}
-	return matches, nil
-}
-
-// Verifies if an URL is working or not.
-// Send head request to the url, and wait for 200 OK response.
-func isUrlAlive(url string) bool {
-	req, err := http.NewRequest("HEAD", url, nil)
-	if err != nil {
-		return false
+func isUrlAlive(url string) (bool, int) {
+	res, err := http.Head(url)
+	if err == nil {
+		return res.StatusCode == http.StatusOK, res.StatusCode
 	}
 
-	res, err := httpClient.Do(req)
+	// If there is some response data, but an error occur --> attempt a GET request
+	// Guardrail for some servers which do not allow HEAD method
 	if res != nil {
-		defer res.Body.Close()
+		res, err = http.Get(url)
+		if err == nil {
+			return false, res.StatusCode
+		}
 	}
-	if err != nil {
-		return false
-	}
 
-	return (res.StatusCode == http.StatusOK)
-}
-
-// Prints both line number and URL with color.
-func printColoredUrl(lineCounter int, url string) {
-	yellow := color.New(color.FgYellow).SprintFunc()
-	green := color.New(color.FgGreen).SprintFunc()
-
-	fmt.Printf("%s > %s\n", yellow(lineCounter), green(url))
+	return false, -1
 }
