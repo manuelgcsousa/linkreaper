@@ -132,6 +132,8 @@ func isUrlAlive(url string, httpClient *http.Client) (bool, int) {
 		if err == nil {
 			return false, res.StatusCode
 		}
+
+		defer res.Body.Close()
 	}
 
 	return false, -1
