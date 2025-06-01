@@ -15,14 +15,21 @@ import (
 	"golang.org/x/net/html/atom"
 )
 
-var (
-	httpClient *http.Client = &http.Client{
-		Transport: &http.Transport{DisableKeepAlives: true}, // don't leave connections open
-		Timeout:   10 * time.Second,
-	}
+type State struct {
+	httpClient *http.Client
+	wg         sync.WaitGroup
+	urlHost    string
+}
 
-	baseUri string
-)
+func initState() State {
+	return State{
+		httpClient: &http.Client{
+			Transport: &http.Transport{DisableKeepAlives: true}, // don't leave connections open
+			Timeout:   10 * time.Second,
+		},
+		urlHost: "",
+	}
+}
 
 func main() {
 	url := flag.String("url", "", "url to fetch")
@@ -33,6 +40,9 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Init program state
+	state := initState()
+
 	// Parse URL and check if it's valid
 	// If so, build the base URI
 	parseUrl, err := urlUtils.Parse(*url)
@@ -40,11 +50,11 @@ func main() {
 		fmt.Printf("Error while extracting base URI from '%s'\n", *url)
 		os.Exit(1)
 	} else {
-		baseUri = fmt.Sprintf("%s://%s", parseUrl.Scheme, parseUrl.Host)
+		state.urlHost = fmt.Sprintf("%s://%s", parseUrl.Scheme, parseUrl.Host)
 	}
 
 	// Fetch provided URL
-	res, err := httpClient.Get(*url)
+	res, err := state.httpClient.Get(*url)
 	if err != nil {
 		fmt.Printf("Error while fetching '%s'\n", *url)
 		os.Exit(1)
@@ -64,23 +74,21 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Init wait group
-	var wg sync.WaitGroup
-
+	// Iterate and process HTML tree nodes
 	for node := range doc.Descendants() {
 		if node.Type != html.ElementNode || node.DataAtom != atom.A {
 			continue
 		}
 
-		wg.Add(1)
-		go processAnchorNodeAttributes(node.Attr, &wg)
+		state.wg.Add(1)
+		go processAnchorNodeAttributes(node.Attr, &state)
 	}
 
-	wg.Wait()
+	state.wg.Wait()
 }
 
-func processAnchorNodeAttributes(attributes []html.Attribute, wg *sync.WaitGroup) {
-	defer wg.Done()
+func processAnchorNodeAttributes(attributes []html.Attribute, state *State) {
+	defer state.wg.Done()
 
 	for _, val := range attributes {
 		// Skip if no 'href' attribute
@@ -99,11 +107,11 @@ func processAnchorNodeAttributes(attributes []html.Attribute, wg *sync.WaitGroup
 			continue
 		} else {
 			if parsedUrl.Scheme == "" && parsedUrl.Host == "" {
-				url = fmt.Sprintf("%s%s", baseUri, url)
+				url = fmt.Sprintf("%s%s", state.urlHost, url)
 			}
 		}
 
-		if status, code := isUrlAlive(url); status {
+		if status, code := isUrlAlive(url, state.httpClient); status {
 			fmt.Printf("['%s' => %d OK]\n", url, code)
 		} else {
 			fmt.Printf("['%s' => %d RIP]\n", url, code)
@@ -111,8 +119,8 @@ func processAnchorNodeAttributes(attributes []html.Attribute, wg *sync.WaitGroup
 	}
 }
 
-func isUrlAlive(url string) (bool, int) {
-	res, err := http.Head(url)
+func isUrlAlive(url string, httpClient *http.Client) (bool, int) {
+	res, err := httpClient.Head(url)
 	if err == nil {
 		return res.StatusCode == http.StatusOK, res.StatusCode
 	}
@@ -120,7 +128,7 @@ func isUrlAlive(url string) (bool, int) {
 	// If there is some response data, but an error occur --> attempt a GET request
 	// Guardrail for some servers which do not allow HEAD method
 	if res != nil {
-		res, err = http.Get(url)
+		res, err = httpClient.Get(url)
 		if err == nil {
 			return false, res.StatusCode
 		}
