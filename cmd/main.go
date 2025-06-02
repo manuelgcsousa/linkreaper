@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	urlUtils "net/url"
+	urlutils "net/url"
 	"os"
 	"strings"
 	"sync"
@@ -40,25 +40,38 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Init program state
+	// Init state and fetch base URL
 	state := initState()
+	state.urlHost = extractBaseUrl(*url)
 
+	// Fetch HTML document
+	htmlDoc := fetchHtmlDocument(*url, state.httpClient)
+
+	// Process links and wait until all work is done
+	processLinks(htmlDoc, &state)
+	state.wg.Wait()
+}
+
+func extractBaseUrl(rawUrl string) string {
 	// Parse URL and check if it's valid
 	// If so, build the base URI
-	parseUrl, err := urlUtils.Parse(*url)
+	parsed, err := urlutils.Parse(rawUrl)
 	if err != nil {
-		fmt.Printf("Error while extracting base URI from '%s'\n", *url)
+		fmt.Printf("Error while extracting base URI from '%s'\n", rawUrl)
 		os.Exit(1)
-	} else {
-		state.urlHost = fmt.Sprintf("%s://%s", parseUrl.Scheme, parseUrl.Host)
 	}
 
+	return fmt.Sprintf("%s://%s", parsed.Scheme, parsed.Host)
+}
+
+func fetchHtmlDocument(url string, client *http.Client) *html.Node {
 	// Fetch provided URL
-	res, err := state.httpClient.Get(*url)
+	res, err := client.Get(url)
 	if err != nil {
-		fmt.Printf("Error while fetching '%s'\n", *url)
+		fmt.Printf("Error while fetching '%s'\n", url)
 		os.Exit(1)
 	}
+	defer res.Body.Close()
 
 	// Extract data from HTTP response
 	bytes, err := io.ReadAll(res.Body)
@@ -74,6 +87,10 @@ func main() {
 		os.Exit(1)
 	}
 
+	return doc
+}
+
+func processLinks(doc *html.Node, state *State) {
 	// Iterate and process HTML tree nodes
 	for node := range doc.Descendants() {
 		if node.Type != html.ElementNode || node.DataAtom != atom.A {
@@ -81,10 +98,8 @@ func main() {
 		}
 
 		state.wg.Add(1)
-		go processAnchorNodeAttributes(node.Attr, &state)
+		go processAnchorNodeAttributes(node.Attr, state)
 	}
-
-	state.wg.Wait()
 }
 
 func processAnchorNodeAttributes(attributes []html.Attribute, state *State) {
@@ -102,7 +117,7 @@ func processAnchorNodeAttributes(attributes []html.Attribute, state *State) {
 		//
 		// If there isn't any scheme or host, it's probably a relative link,
 		// so we join with the host URL.
-		parsedUrl, err := urlUtils.Parse(url)
+		parsedUrl, err := urlutils.Parse(url)
 		if err != nil {
 			continue
 		} else {
