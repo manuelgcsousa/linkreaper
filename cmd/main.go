@@ -120,20 +120,19 @@ func processAnchorNodeAttributes(attributes []html.Attribute, state *State) {
 }
 
 func isUrlAlive(url string, httpClient *http.Client) (bool, int) {
-	res, err := httpClient.Head(url)
-	if err == nil {
-		return res.StatusCode == http.StatusOK, res.StatusCode
+	methods := []func(string) (*http.Response, error){
+		httpClient.Head,
+		httpClient.Get,
 	}
 
-	// If there is some response data, but an error occur --> attempt a GET request
-	// Guardrail for some servers which do not allow HEAD method
-	if res != nil {
-		res, err = httpClient.Get(url)
-		if err == nil {
-			return false, res.StatusCode
+	for _, method := range methods {
+		res, err := method(url)
+		if res != nil {
+			defer res.Body.Close()
 		}
-
-		defer res.Body.Close()
+		if err == nil {
+			return res.StatusCode == http.StatusOK, res.StatusCode
+		}
 	}
 
 	return false, -1
