@@ -2,8 +2,6 @@
 
 Checks which URLs are alive within a webpage.
 
-- Still a WIP, features still missing.
-
 ## Usage
 
 1. Build:
